@@ -1,4 +1,6 @@
-# llmwiki
+# llmwiki-compiler-test
+
+
 
 A knowledge compiler CLI. Raw sources in, interlinked wiki out.
 
