@@ -34,7 +34,7 @@ function withLangLine(...lines: string[]): string[] {
  * downstream auditor can distinguish pages produced under different prompt
  * generations even when the model id is identical. Format is `vMAJOR`.
  */
-export const PROMPT_VERSION = "v1";
+export const PROMPT_VERSION = "v2";
 
 /** Allowed provenance state strings emitted by the LLM tool schema. */
 const PROVENANCE_STATE_VALUES: ProvenanceState[] = [
@@ -127,9 +127,10 @@ export function buildExtractionPrompt(
   return [
     ...withLangLine(
       "You are a knowledge extraction engine. Analyze the following source document",
-      "and identify 3-8 distinct, meaningful concepts worth documenting as wiki pages.",
+      "and identify all distinct, meaningful concepts worth documenting as wiki pages.",
       "Each concept should be a standalone topic that someone might look up.",
-      "Focus on key ideas, techniques, patterns, or entities — not trivial details.",
+      "Focus on key ideas, techniques, patterns, or entities, including supporting details,",
+      "data points, examples, and illustrative cases from the source material.",
       "Use the extract_concepts tool to return your findings.",
     ),
     "",
@@ -174,9 +175,12 @@ export function buildPagePrompt(
     ...withLangLine(
       `You are a wiki author. Write a clear, well-structured markdown page about "${concept}".`,
       "Draw facts only from the provided source material.",
+      "Include ALL relevant information from the source material — do not omit details that",
+      "a reader consulting the original source would expect to find here. Include supporting",
+      "data points, examples, code snippets, and illustrative cases.",
       "Include a ## Sources section at the end listing the source document.",
       "Suggest [[wikilinks]] to related concepts where appropriate.",
-      "Write in a neutral, informative tone. Be concise but thorough.",
+      "Write in a neutral, informative tone. Be thorough and complete.",
     ),
     "",
     "Source attribution: at the end of each prose paragraph, append a citation",
@@ -280,8 +284,10 @@ export function buildSeedPagePrompt(
       `Page-kind guidance: ${rule.description}`,
       `Summary line for context: ${seed.summary}`,
       "Draw facts only from the related wiki pages provided below.",
+      "Include ALL relevant information from the source pages — synthesize and integrate",
+      "rather than omit. Preserve specific examples, data points, and code snippets.",
       linkExpectation,
-      "Write in a neutral, informative tone. Be concise but thorough.",
+      "Write in a neutral, informative tone. Be thorough and complete.",
     ),
     "\n\n--- RELATED PAGES ---\n\n",
     relatedPagesContent,
