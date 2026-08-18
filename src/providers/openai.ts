@@ -52,7 +52,9 @@ function resolveOpenAITimeoutMs(): number | undefined {
  */
 const PLACEHOLDER_API_KEY = "llmwiki-unset";
 
-/** Translate an Anthropic-style LLMTool to an OpenAI ChatCompletionTool. */
+/**
+ * Translate an Anthropic-style LLMTool to an OpenAI ChatCompletionTool.
+ */
 export function translateToolToOpenAI(
   tool: LLMTool,
 ): OpenAI.ChatCompletionTool {
@@ -64,6 +66,48 @@ export function translateToolToOpenAI(
       parameters: tool.input_schema,
     },
   };
+}
+
+/**
+ * Read the LLMWIKI_TOOL_CHOICE_MODE env var to determine tool calling strategy.
+ * 
+ * - "strict" (default): Use tool_choice="required" to force tool invocation.
+ *   This is the standard mode for most models and ensures tools are always called.
+ * 
+ * - "thinking": Use tool_choice="auto" with enhanced prompt constraints.
+ *   Required for models with thinking/reasoning modes (e.g., Qwen thinking models)
+ *   where tool_choice="required" conflicts with the thinking process and returns 400 errors.
+ *   The enhanced prompt strongly instructs the model to invoke tools despite "auto" choice.
+ *   Also includes automatic 400 error retry with "auto" fallback.
+ */
+function getToolChoiceMode(): "strict" | "thinking" {
+  const mode = process.env.LLMWIKI_TOOL_CHOICE_MODE?.trim().toLowerCase();
+  if (mode === "thinking") return "thinking";
+  return "strict";
+}
+
+/**
+ * Check if thinking mode is enabled via LLMWIKI_TOOL_CHOICE_MODE.
+ */
+function isThinkingModeEnabled(): boolean {
+  return getToolChoiceMode() === "thinking";
+}
+
+/**
+ * Append thinking-mode constraint instruction to system prompt.
+ * In thinking mode with tool_choice="auto", the model might choose to respond
+ * with plain text instead of calling a tool. This strong instruction ensures
+ * tool invocation despite the "auto" setting.
+ */
+function enhanceSystemPromptForThinkingMode(system: string): string {
+  const instruction = [
+    "",
+    "[MANDATORY TOOL USE]",
+    "You MUST invoke one of the provided tools by calling it with valid structured arguments.",
+    "Do NOT respond with plain text explanations or reasoning alone.",
+    "A tool call is REQUIRED for every response.",
+  ].join("\n");
+  return system + instruction;
 }
 
 /** OpenAI-backed LLM provider. */
@@ -136,22 +180,77 @@ export class OpenAIProvider implements LLMProvider {
     maxTokens: number,
   ): Promise<string> {
     const openaiTools = tools.map(translateToolToOpenAI);
+    const useThinkingMode = isThinkingModeEnabled();
 
+    // In thinking mode, use "auto" to avoid 400 errors from reasoning models
+    // (e.g., Qwen thinking) where tool_choice="required" conflicts with the
+    // thinking process. An enhanced prompt still forces tool invocation.
+    const toolChoice: "required" | "auto" = useThinkingMode ? "auto" : "required";
+    const systemPrompt = useThinkingMode
+      ? enhanceSystemPromptForThinkingMode(system)
+      : system;
+
+    try {
+      return await this.callAndExtractToolResult(
+        systemPrompt, messages, openaiTools, maxTokens, toolChoice,
+      );
+    } catch (error) {
+      // Retry with "auto" on thinking-mode tool_choice conflicts.
+      if (useThinkingMode && this.isToolChoiceConflictError(error)) {
+        return this.callAndExtractToolResult(
+          systemPrompt, messages, openaiTools, maxTokens, "auto",
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Check if an error is a tool_choice conflict (400) related to thinking mode.
+   * DashScope returns: "The tool_choice parameter does not support being set to
+   * required or object in thinking mode"
+   */
+  private isToolChoiceConflictError(error: unknown): boolean {
+    if (error && typeof error === "object") {
+      const err = error as { status?: number; message?: string; error?: { message?: string } };
+      const status = err.status;
+      const message = err.message ?? err.error?.message ?? "";
+      const lowerMessage = message.toLowerCase();
+      
+      return (
+        status === 400 &&
+        (lowerMessage.includes("tool_choice") || lowerMessage.includes("thinking mode"))
+      );
+    }
+    return false;
+  }
+
+  /**
+   * Send a tool-calling completion request and return the parsed tool
+   * arguments as JSON. When the model does not invoke a tool, falls back
+   * to the plain text content (empty string if neither is present).
+   */
+  private async callAndExtractToolResult(
+    systemPrompt: string,
+    messages: LLMMessage[],
+    openaiTools: OpenAI.ChatCompletionTool[],
+    maxTokens: number,
+    toolChoice: "required" | "auto",
+  ): Promise<string> {
     const response = await this.client.chat.completions.create({
       model: this.model,
       max_tokens: maxTokens,
-      messages: [{ role: "system", content: system }, ...messages],
+      messages: [{ role: "system", content: systemPrompt }, ...messages],
       tools: openaiTools,
-      tool_choice: "required",
+      tool_choice: toolChoice,
     });
 
     // openai v6 made tool_calls a union of function and custom calls; only the
     // function variant carries `.function`.
-    const toolCall = response.choices[0]?.message?.tool_calls?.[0];
-    if (toolCall?.type === "function") {
-      return toolCall.function.arguments;
+    const call = response.choices[0]?.message?.tool_calls?.[0];
+    if (call?.type === "function") {
+      return call.function.arguments;
     }
-
     return response.choices[0]?.message?.content ?? "";
   }
 
